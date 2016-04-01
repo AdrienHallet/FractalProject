@@ -19,8 +19,7 @@ int main(int argc, const char * argv[])
     	return 0;
 */
 
-	int argCount = 1; //Defaullt value when no args given
-	if(argCount==argc){
-		printf("Error : misusing the application\n");
+	if(handle_no_arguments(argc) < 0){
+		return 0;	
 	}
 }
