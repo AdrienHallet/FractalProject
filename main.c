@@ -2,13 +2,17 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <semaphore.h>
 #include "libfractal/fractal.h"
 #include "errorHandling.h"
 
-struct arg_readStruct{
-	const char *filename;
-	void *buffer;
-};
+struct fractal *(*buffer)[];
+int counter; //current buffered data
+pthread_mutex_t buffer_access;
+int maxthreads;
+sem_t full, empty;
+
+int hasNextData;
 
 char *strsep(char **stringp, const char *delim){
 	char *s;
@@ -40,17 +44,32 @@ struct fractal *fractal_parse(char *line){
 	char **endptr;
 	long value;
 	char *name = strsep(&line, delim);
-
 	int width = (int) strtol(strsep(&line, delim), endptr, 10);
 	int height = (int) strtol(strsep(&line, delim), endptr, 10);
-	double a = (double) strtol(strsep(&line, delim), endptr, 10);
-	double b= (double) strtol(strsep(&line, delim), endptr, 10);
+	double a = (double)atof(strsep(&line, delim));
+	double b= (double) atof(strsep(&line, delim));
 	struct fractal *newfractal = fractal_new(name, width, height, a, b);
-
+	return newfractal;
 	
 }
 
-int *readFile(const char *filename, struct fractal *(buffer)[]){
+int insert_fractal(struct fractal *fractal){
+	/* When the buffer is not full add the item
+	and increment the counter*/
+	if(counter < maxthreads) {
+		(*buffer)[counter] = fractal;
+		printf("Saved %s in %d\n", (*buffer)[counter]->name, counter);
+		printf("%s, %d %d %f %f\n", (*buffer)[counter]->name, (*buffer)[counter]->width, (*buffer)[counter]->height, (*buffer)[counter]->a, (*buffer)[counter]->b);
+		fflush(stdout);
+		counter++;
+		return 0;
+	}
+	else { /* Error the buffer is full */
+		return -1;
+	}
+}
+
+int *readFile(const char *filename){
 	FILE *fp;
 	char *line = NULL;
 	size_t len = 0;
@@ -61,13 +80,67 @@ int *readFile(const char *filename, struct fractal *(buffer)[]){
 	return -1;
 	while ((read = getline(&line, &len, fp)) != -1) {
 		if(read>1 && line[0]!='#'){ //ignore empty lines and comments
-		struct fractal *myfrac = fractal_parse(line);
-		iteration++;
+			sem_wait(&empty);
+			struct fractal *myfrac = fractal_parse(line);
+			iteration++;
+			pthread_mutex_lock(&buffer_access);
+			if(insert_fractal(myfrac)) {
+				fprintf(stderr, " Producer report error condition\n");
+			}
+			/* release the mutex lock */
+			pthread_mutex_unlock(&buffer_access);
+			sem_post(&full);
 		}
 	}
-	free(line);
-	free(fp);
+	hasNextData=0;
+	fclose(fp);
+        free(line);
 	pthread_exit(iteration);
+}
+
+int remove_fractal(struct fractal *fractal) {
+   /* When the buffer is not empty remove the item
+      and decrement the counter */
+   if(counter > 0) {
+      fractal = (*buffer)[(counter-1)];
+      counter--;
+      return 0;
+   }
+   else { /* Error buffer empty */
+      return -1;
+   }
+}
+
+/* Consumer Thread */
+void *compute(void *param) {
+   struct fractal *fractal;
+	sem_wait(&full);
+   while(hasNextData && counter>0) {
+	printf("Will consume %d\n", counter);
+
+      pthread_mutex_lock(&buffer_access);
+      if(remove_fractal(fractal)) {
+         fprintf(stderr, "Consumer report error condition\n");
+      }
+      else {
+	int w,h,x,y;
+	w=(*buffer)[(counter)]->width;
+	h=(*buffer)[(counter)]->height;
+	printf("%d %d\n", w, h);
+	for(x = 0; x < w; x++){
+		for(y = 0; y < h; y++){
+			fractal_compute_value((*buffer)[(counter)],x,y);
+		}
+	
+	}
+	printf("computation ended\n");
+	write_bitmap_sdl((*buffer)[(counter)], "Image.bmp");
+      }
+      /* release the mutex lock */
+      pthread_mutex_unlock(&buffer_access);
+      /* signal empty */
+      sem_post(&empty);
+   }
 }
 
 int main(int argc, const char * argv[])
@@ -89,29 +162,38 @@ int main(int argc, const char * argv[])
 	if(handle_no_arguments(argc) < 0){
 		return 0;	
 	}
-	int maxThreads = 10;
-	struct fractal *fractalBuffer[maxThreads];
+	maxthreads = 10;
+	counter = 0;
+	hasNextData = 1;
+	struct fractal *fractalBuffer[maxthreads];
 	int i;
-	for(i = 0; i < maxThreads; i++){
+	for(i = 0; i < maxthreads; i++){
 		fractalBuffer[i] = malloc(sizeof(struct fractal));
-		fractalBuffer[i] = NULL;
 	}
-	struct fractal *(*buffer)[] = &fractalBuffer;
+	sem_init(&full,0,0);
+	sem_init(&empty,0,1);
+	if (pthread_mutex_init(&buffer_access, NULL) != 0)
+	{
+		printf("\n mutex init failed\n");
+		return 1;
+	}
+
+	buffer = &fractalBuffer;
 	const char *filename = "inputfile1";
 	pthread_t thread;
-	struct arg_readStruct args;
-	args.filename = filename;
-	args.buffer = (void *)buffer;
-	if(pthread_create(&thread, NULL, readFile, (void *)&args) == -1)
-		return EXIT_FAILURE;
-	printf("Thread created\n");
-	int *iteration;
-	if(pthread_join(thread, iteration))
-		return EXIT_FAILURE;
 	
-
-	for(i = 0; i < maxThreads; i++){
-		free(fractalBuffer[i]);
+	if(pthread_create(&thread, NULL, readFile, filename) == -1)
+		return EXIT_FAILURE;
+	for(i = 0; i < 1; i++) { //REPLACE 2 BY MAXTHREADS WHEN TEST CLEARED
+		pthread_t thread;
+		pthread_create(&thread,NULL,compute,NULL);
+		if(pthread_join(thread, NULL))
+			return EXIT_FAILURE;
 	}
+
+
+	if(pthread_join(thread, NULL))
+		return EXIT_FAILURE;
+	free((*fractalBuffer));
 	return 0;
 }
