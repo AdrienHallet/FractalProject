@@ -9,7 +9,7 @@ LIBFILE=libfractal.a
 all: test
 
 test: main.o handleArgument.o
-	gcc -Wall -o main main.o handleArgument.o -L/home/osboxes/Documents/Fractales/libfractal -lfractal -I/usr/include/SDL -lSDLmain -lSDL -pthread
+	gcc -Wall -o main main.o handleArgument.o -L/libfractal -lfractal -I/usr/include/SDL -lSDLmain -lSDL -pthread
 
 main.o: main.c
 	gcc -Wall -c main.c -I../libfractal
