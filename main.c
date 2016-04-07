@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <string.h>
 #include <pthread.h>
 #include <semaphore.h>
 #include "libfractal/fractal.h"
@@ -8,19 +9,28 @@
 
 #define EXIT_SIGNAL "SIGNAl_THREAD_EXIT"
 
-struct fractal *(*buffer)[];
-struct arguments *args;
-struct fractal *average_fractal;
-int current_average;
+struct fractal *(*buffer)[]; //Buffer, contains fractals pointers, size of max threads
+struct fractal *average_fractal; //Pointer to final result
+struct arguments *args; //arg structure, contains data for current computation
+
+double* current_average;
 int counter; //current buffered data
 int thread_counter;
+
+/*Mutexes*/
 pthread_mutex_t buffer_access;
 pthread_mutex_t thread_count;
 pthread_mutex_t average_access;
+/*Semaphores*/
 sem_t full, empty;
-const char *extension = ".bmp";
-const char *filename;
 
+const char *extension = ".bmp"; //generated image extension
+
+/* debug_print_buffer : DEBUG, prints the current buffer
+** 
+** Prints the current buffer data on standard output, name and pointers.
+** @a : number of fractals not to print (starting buffer's end)
+*/
 void debug_print_buffer(int a){
 	int i;
 	printf("DEBUG PRINT BUFFER\n");
@@ -32,7 +42,10 @@ void debug_print_buffer(int a){
 		printf("At counter %d the name is : %s\n", i, (*buffer)[i]->name);
 	}
 }
-//HELP FUNCTION - TO MOVE IN OTHER FILE
+/* strsep : standard strsep implementation
+** 
+**
+*/
 char *strsep(char **stringp, const char *delim){
 	char *s;
 	const char *spanp;
@@ -96,15 +109,10 @@ int isExitSignal(struct fractal* signal){
 }
 
 int *send_signals(){
-	printf("Send the signals\n");
 	fflush(stdout);
 	int thread;
 	for(thread = 0; thread < args->maxThreads; thread++){
-		printf("Waiting----------\n");
-		fflush(stdout);
 		sem_wait(&empty);
-		printf("WAITED----------------\n");
-		fflush(stdout);
 		pthread_mutex_lock(&buffer_access);
 		struct fractal *myfrac = fractal_new(EXIT_SIGNAL, 0, 0, 0, 0);
 		if(insert_fractal(myfrac)) {
@@ -116,16 +124,15 @@ int *send_signals(){
 	return 0;
 }
 
-int *readFile(const char *filename){
-
+void *readFile(void *filename){
 	FILE *fp;
 	char *line = NULL;
 	size_t len = 0;
 	ssize_t read;
 	int iteration = 0;
-	fp = fopen(filename, "r");
+	fp = fopen((char *)filename, "r");
 	if (fp == NULL)
-		return -1;
+		pthread_exit(NULL);
 	while (read != -1) {
 		iteration++;
 		read = getline(&line, &len, fp);
@@ -144,14 +151,13 @@ int *readFile(const char *filename){
 	}
 	pthread_mutex_lock(&thread_count);
 	thread_counter--;
-	printf("THREAD OUT : %d\n", thread_counter);
 	fflush(stdout);
 	if(thread_counter==0)
 		send_signals();
 	pthread_mutex_unlock(&thread_count);
 	fclose(fp);
         free(line);
-	pthread_exit(1);
+	pthread_exit(NULL);
 }
 
 int remove_fractal(struct fractal **fractal) {
@@ -172,15 +178,57 @@ int remove_fractal(struct fractal **fractal) {
    }
 }
 
+void *one_computation(struct fractal* fractal, double this_average){
+	int w,h,x,y;
+	w=fractal_get_width(fractal);
+	h=fractal_get_height(fractal);
+	char *filename = malloc(strlen(fractal_get_name(fractal))+strlen(extension)+strlen(args->currentDirectory)+1);
+	strcpy(filename, args->currentDirectory);
+	strcat(filename, fractal_get_name(fractal));
+	strcat(filename, extension);
+	double average =0.0;
+	fflush(stdout);
+	for(x = 0; x < w; x++){
+		for(y = 0; y < h; y++){
+			fractal_compute_value(fractal,x,y);
+			average += fractal_get_value(fractal, x, y);
+		}
+
+	}
+	average = average/(fractal_get_height(fractal) * fractal_get_width(fractal));
+	pthread_mutex_lock(&average_access);
+	printf("AVERAGE WAS : %f\n", this_average);
+	printf("THIS ONE IS : %f\n", average);
+	if(average>this_average){
+		average_fractal = fractal_new(fractal_get_name(fractal),
+					 fractal_get_width(fractal), 
+					 fractal_get_height(fractal), 
+					 fractal_get_a(fractal), 
+					 fractal_get_b(fractal));
+
+	}
+	pthread_mutex_unlock(&average_access);
+	if(args->allImages){
+		if(access(filename, F_OK) != -1){ //if file exists
+			fprintf(stderr, "Fractal %s already exists\n", fractal_get_name(fractal));
+		}
+		else{
+			write_bitmap_sdl(fractal, filename);
+			printf("C:Created %s\n", filename);
+		}
+		
+	}
+	
+	free(filename);
+}
+
 void *compute()
 {
 	struct fractal **fractal;
 	fractal = malloc(sizeof(struct fractal*));
 	while(1) {
-		printf("Will wait\n");
 		sem_wait(&full);
 		pthread_mutex_lock(&buffer_access);
-		printf("Has waited\n");
 		fflush(stdout);
 		if(remove_fractal(fractal)) {
 			fprintf(stderr, "Consumer report error condition\n");
@@ -194,7 +242,6 @@ void *compute()
 			pthread_exit(0);
 		}
 		else {
-			printf("Treating %s\n", fractal_get_name(*fractal));
 			fflush(stdout);
 			pthread_mutex_unlock(&buffer_access);
 			int w,h,x,y;
@@ -204,8 +251,7 @@ void *compute()
 			strcpy(filename, args->currentDirectory);
 			strcat(filename, fractal_get_name(*fractal));
 			strcat(filename, extension);
-			double average;
-			printf("Starting computations\n");
+			double average = 0.0;
 			fflush(stdout);
 			for(x = 0; x < w; x++){
 				for(y = 0; y < h; y++){
@@ -214,20 +260,19 @@ void *compute()
 				}
 
 			}
-			printf("Ended computations\n");
 			average = average/(fractal_get_height(*fractal) * fractal_get_width(*fractal));
-			printf("Will lock average\n");
 			pthread_mutex_lock(&average_access);
-			if(average>current_average){
+			printf("%f\n", average);
+			if(average>*current_average){
 				average_fractal = fractal_new(fractal_get_name(*fractal),
 							 fractal_get_width(*fractal), 
 							 fractal_get_height(*fractal), 
 							 fractal_get_a(*fractal), 
 							 fractal_get_b(*fractal));
+				*current_average = average;
 
 			}
 			pthread_mutex_unlock(&average_access);
-			printf("Unlocked average\n");
 			if(args->allImages){
 				if(access(filename, F_OK) != -1){ //if file exists
 					fprintf(stderr, "File %s already exists\n");
@@ -237,10 +282,9 @@ void *compute()
 				}
 				printf("C:Created %s\n", filename);
 			}
-			
+			printf("new average is %f\n", *current_average);
 			free(filename);
 		}
-		printf("Ended one computation\n");
 		fractal_free(*fractal);
 		/* signal empty */
 		sem_post(&empty);
@@ -254,11 +298,13 @@ int initialize()
 {
 	thread_counter = 0;
 	counter = 0;
+	double zero = 0.0;
+	current_average = malloc(sizeof(double));
+	current_average = &zero;
 	average_fractal = malloc(sizeof(struct fractal*));
 	//struct fractal *fbuffer = malloc(maxThreads * sizeof(struct fractal));
 	//buffer = &fbuffer;	
 	
-	printf("%d\n", args->maxThreads);
 	buffer = malloc((int)args->maxThreads * sizeof(struct fractal));
 	
 	sem_init(&full, 0, 0);
@@ -276,11 +322,9 @@ int initialize()
 	}
 	return 1;
 }
-
 int launch_threads()
 {
 	int i;
-	current_average = 0;
 	//producer
 	pthread_t producer[(int)args->inputCount];
 	thread_counter = args->inputCount;
@@ -304,43 +348,32 @@ int launch_threads()
 		if(pthread_join(consumer[i], NULL))
 			return EXIT_FAILURE;
 	}
+	
+	free(buffer);
+	return 0;
+}
+
+void *compute_average(){
 	char *output_file = malloc(strlen(args->outputFile)+strlen(args->currentDirectory)+strlen(extension)+1);
 	strcpy(output_file, args->currentDirectory);
 	strcat(output_file, args->outputFile);
 	strcat(output_file, extension);
 	int x,y;
 	int w = fractal_get_width(average_fractal);
-	printf("%d\n", w);
 	int h = fractal_get_height(average_fractal);
-	printf("%d\n", h);
-	double a = fractal_get_a(average_fractal);
-	printf("%f\n", a);
-	double b = fractal_get_b(average_fractal);
-	printf("%f\n", b);
-	printf("new fractal final\n");
-	//free(average_fractal);
-	printf("freed\n");
-	//struct fractal *final = fractal_new("Final", 50, 50, -0.5, 0.4);
-	printf("%d %d\n", w, h);
+
+	printf("Our max average fractal is %s\n", fractal_get_name(average_fractal));
+
 	for(x = 0; x < w; x++){
 		for(y = 0; y < h; y++){
 			fractal_compute_value(average_fractal,x,y);
 		}
 
 	}
-	printf("Will crash ?\n");
 	write_bitmap_sdl(average_fractal, output_file);
-	printf("no \n");
-	printf("freeing fractal\n");
 	fractal_free(average_fractal);
-	printf("freeing output\n");
 	free(output_file);
-	printf("freeing buffer\n");
-	free(buffer);
-	return 0;
 }
-
-
 
 int main(int argc, const char * argv[])
 {
@@ -350,12 +383,26 @@ int main(int argc, const char * argv[])
 		return 0;	
 	}
 	args = parse_arguments(argc, argv);
-	printf("%s\n", args->currentDirectory);	
 	
-	if(!initialize())
-		return NULL;
+	if(!initialize()){
+		fprintf(stderr, "Could not initialize the application\n");
+		exit(0);
+	}
 	launch_threads();
+	double avg = *current_average;
+	if(args->needInput){
+		char *input;
+		size_t size = (2*sizeof(int)+2*sizeof(double)+68*sizeof(char));
+		fprintf(stdout, "Please, write a fractal as : NAME WIDTH(px) HEIGHT(px) REAL_PART IMAGINARY_PART\n");
+		if(fgets(input, size, stdin) != NULL){
+			printf("%d\n", avg);
+			struct fractal* input_fractal = fractal_parse(input);
+			one_computation(input_fractal, avg);
+			fractal_free(input_fractal);
+			
+		}
+	}
+	compute_average();
 	printf("Execution finished\n");
 	return 0;
-	
 }
