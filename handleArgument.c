@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 #include "handleArgument.h"
 
@@ -48,11 +49,10 @@ struct arguments *parse_arguments(int argc, const char* argv[]){
 	for(i = 0; i<input; i++){
 		in[i] = malloc(sizeof(cwd));
 	}
-	args->inputFiles = &in;
+	args->inputFiles = in;
 	args->inputCount = input;
 	input = 0;
 
-	printf("%s\n", args->outputFile);
 	args->allImages = 0;
 	args->maxThreads = 10;
 	args->needInput = 0;
@@ -64,22 +64,24 @@ struct arguments *parse_arguments(int argc, const char* argv[]){
 			interpreted++;
 		}else if(argv[i][1] == 'd'){
 			args->allImages = 1;
-			interpreted++;
 		}
 		else if(argv[i][1] == '-'){
 			const char* thread;
 			thread = argv[i];
 			args->maxThreads = (int) atoi(thread+2);
-			interpreted++;
 		}
 		else{
-			//Do nothing
+			interpreted++;
 		}
 			
 	}
-	if(interpreted!=argc)
-		args->needInput = 1;
 	args->inputCount = input;
+
+	if(interpreted!=args->inputCount)
+		args->needInput = 1;
+	else
+		args->needInput = 0;
+
 	return args;
 }
 
@@ -87,7 +89,8 @@ int free_arguments(struct arguments* args){
 	free(args->outputFile);	
 	free(args->currentDirectory);
 	int i;
-	for(i=0; i<args->inputCount; i++){
+	for(i=0; i < args->inputCount; i++){
 		free(args->inputFiles[i]);
 	}
+	return 1;
 }
